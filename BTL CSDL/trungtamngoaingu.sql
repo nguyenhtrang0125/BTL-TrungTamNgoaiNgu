@@ -39,6 +39,7 @@ CREATE TABLE giao_vien (
     gioi_tinh    VARCHAR(10)  NOT NULL,
     trinh_do     VARCHAR(30)  NOT NULL,
     ngay_vao_lam DATE         NOT NULL,
+    loai_hop_dong VARCHAR(50) NOT NULL,
     sdt          VARCHAR(20)  NOT NULL,
     email        VARCHAR(100) NOT NULL,
     trang_thai   VARCHAR(20)  NOT NULL DEFAULT 'Dang day',
@@ -57,6 +58,7 @@ CREATE TABLE giao_vien (
     CONSTRAINT ck_gv_trinh_do     CHECK (trinh_do IN ('Cao dang','Dai hoc','Thac si','Tien si','Chung chi','Khac')),
     CONSTRAINT ck_gv_ngay_vao_lam CHECK (ngay_vao_lam >= '2000-01-01'),
     CONSTRAINT ck_gv_du_18_tuoi   CHECK (ngay_vao_lam >= DATE_ADD(ngay_sinh, INTERVAL 18 YEAR)),
+    CONSTRAINT ck_gv_loai_hop_dong CHECK (loai_hop_dong IN ('Toan thoi gian','Ban thoi gian','Thinh giang','Thu viec','Cong tac vien')),
     CONSTRAINT ck_gv_sdt          CHECK (sdt REGEXP '^0[0-9]{9}$'),
     CONSTRAINT ck_gv_email        CHECK (email REGEXP '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$'),
     CONSTRAINT ck_gv_trang_thai   CHECK (trang_thai IN ('Dang day','Tam nghi','Da nghi viec'))
@@ -144,16 +146,37 @@ CREATE TABLE hoc_phi (
     CONSTRAINT ck_hp_trang_thai CHECK (trang_thai IN ('Chua thanh toan','Thanh toan mot phan','Da thanh toan'))
 ) ENGINE=InnoDB;
 
+CREATE TABLE dot_dong_hoc_phi (
+    ma_dot            VARCHAR(10)   NOT NULL,
+    ma_hp             VARCHAR(10)   NOT NULL,
+    so_thu_tu         TINYINT       NOT NULL,
+    so_tien_phai_dong DECIMAL(12,2) NOT NULL,
+    han_dong          DATE          NOT NULL,
+    so_tien_da_dong   DECIMAL(12,2) NOT NULL DEFAULT 0,
+    trang_thai        VARCHAR(20)   NOT NULL DEFAULT 'Chua dong',
+
+    PRIMARY KEY (ma_dot),
+    CONSTRAINT uq_dot_stt UNIQUE (ma_hp, so_thu_tu),
+    CONSTRAINT fk_dot_hp FOREIGN KEY (ma_hp) REFERENCES hoc_phi(ma_hp),
+
+    CONSTRAINT ck_dot_ma         CHECK (REGEXP_LIKE(ma_dot, '^DT[0-9]{2,8}$', 'c')),
+    CONSTRAINT ck_dot_stt        CHECK (so_thu_tu BETWEEN 1 AND 12),
+    CONSTRAINT ck_dot_phai_dong  CHECK (so_tien_phai_dong > 0),
+    CONSTRAINT ck_dot_han        CHECK (han_dong >= '2000-01-01'),
+    CONSTRAINT ck_dot_da_dong    CHECK (so_tien_da_dong >= 0 AND so_tien_da_dong <= so_tien_phai_dong),
+    CONSTRAINT ck_dot_trang_thai CHECK (trang_thai IN ('Chua dong','Dong mot phan','Da dong'))
+) ENGINE=InnoDB;
+
 CREATE TABLE phieu_thu (
     ma_pt       VARCHAR(10)   NOT NULL,
-    ma_hp       VARCHAR(10)   NOT NULL,
+    ma_dot      VARCHAR(10)   NOT NULL,
     ngay_thu    DATE          NOT NULL,
     so_tien_thu DECIMAL(12,2) NOT NULL,
     hinh_thuc   VARCHAR(20)   NOT NULL DEFAULT 'Tien mat',
     ghi_chu     VARCHAR(255),
 
     PRIMARY KEY (ma_pt),
-    CONSTRAINT fk_pt_hp FOREIGN KEY (ma_hp) REFERENCES hoc_phi(ma_hp),
+    CONSTRAINT fk_pt_dot FOREIGN KEY (ma_dot) REFERENCES dot_dong_hoc_phi(ma_dot),
 
     CONSTRAINT ck_pt_ma        CHECK (REGEXP_LIKE(ma_pt, '^PT[0-9]{2,8}$', 'c')),
     CONSTRAINT ck_pt_ngay      CHECK (ngay_thu >= '2000-01-01'),
@@ -218,6 +241,7 @@ CREATE INDEX idx_gv_ho_ten      ON giao_vien (ho_ten);
 CREATE INDEX idx_lop_trang_thai ON lop_hoc (trang_thai, ngay_khai_giang);
 CREATE INDEX idx_gd_trang_thai  ON ghi_danh (ma_lop, trang_thai_dk);
 CREATE INDEX idx_hp_trang_thai  ON hoc_phi (trang_thai);
+CREATE INDEX idx_dot_han        ON dot_dong_hoc_phi (han_dong, trang_thai);
 CREATE INDEX idx_pt_ngay        ON phieu_thu (ngay_thu);
 CREATE INDEX idx_dd_lop_ngay    ON diem_danh (ma_lop, ngay_diem_danh);
 
@@ -319,6 +343,16 @@ END$$
 
 CREATE TRIGGER trg_hp_bu BEFORE UPDATE ON hoc_phi FOR EACH ROW
 BEGIN
+    DECLARE v_da_chia DECIMAL(12,2);
+
+    IF NEW.so_tien <> OLD.so_tien THEN
+        SELECT COALESCE(SUM(so_tien_phai_dong), 0) INTO v_da_chia
+          FROM dot_dong_hoc_phi WHERE ma_hp = NEW.ma_hp;
+        IF NEW.so_tien < v_da_chia THEN
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Tong hoc phi khong duoc nho hon tong cac dot da chia';
+        END IF;
+    END IF;
+
     SET NEW.trang_thai = CASE
         WHEN NEW.con_no = 0              THEN 'Da thanh toan'
         WHEN NEW.con_no < NEW.so_tien    THEN 'Thanh toan mot phan'
@@ -326,19 +360,75 @@ BEGIN
     END;
 END$$
 
+CREATE TRIGGER trg_dot_bi BEFORE INSERT ON dot_dong_hoc_phi FOR EACH ROW
+BEGIN
+    DECLARE v_tong     DECIMAL(12,2);
+    DECLARE v_ngay_tao DATE;
+    DECLARE v_da_chia  DECIMAL(12,2);
+    DECLARE v_han_truoc DATE;
+
+    SELECT so_tien, ngay_tao INTO v_tong, v_ngay_tao FROM hoc_phi WHERE ma_hp = NEW.ma_hp;
+
+    IF v_tong IS NOT NULL THEN
+        IF NEW.han_dong < v_ngay_tao THEN
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Han dong khong duoc truoc ngay tao hoc phi';
+        END IF;
+
+        SELECT COALESCE(SUM(so_tien_phai_dong), 0) INTO v_da_chia
+          FROM dot_dong_hoc_phi WHERE ma_hp = NEW.ma_hp;
+        IF v_da_chia + NEW.so_tien_phai_dong > v_tong THEN
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Tong cac dot vuot qua tong hoc phi';
+        END IF;
+
+        SELECT MAX(han_dong) INTO v_han_truoc
+          FROM dot_dong_hoc_phi WHERE ma_hp = NEW.ma_hp AND so_thu_tu < NEW.so_thu_tu;
+        IF v_han_truoc IS NOT NULL AND NEW.han_dong < v_han_truoc THEN
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Han dong cua dot sau khong duoc som hon dot truoc';
+        END IF;
+    END IF;
+
+    SET NEW.so_tien_da_dong = 0;
+    SET NEW.trang_thai = 'Chua dong';
+END$$
+
+CREATE TRIGGER trg_dot_bu BEFORE UPDATE ON dot_dong_hoc_phi FOR EACH ROW
+BEGIN
+    DECLARE v_tong    DECIMAL(12,2);
+    DECLARE v_cac_dot DECIMAL(12,2);
+
+    IF NEW.so_tien_phai_dong <> OLD.so_tien_phai_dong THEN
+        SELECT so_tien INTO v_tong FROM hoc_phi WHERE ma_hp = NEW.ma_hp;
+        SELECT COALESCE(SUM(so_tien_phai_dong), 0) INTO v_cac_dot
+          FROM dot_dong_hoc_phi WHERE ma_hp = NEW.ma_hp AND ma_dot <> NEW.ma_dot;
+        IF v_cac_dot + NEW.so_tien_phai_dong > v_tong THEN
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Tong cac dot vuot qua tong hoc phi';
+        END IF;
+    END IF;
+
+    SET NEW.trang_thai = CASE
+        WHEN NEW.so_tien_da_dong = 0                      THEN 'Chua dong'
+        WHEN NEW.so_tien_da_dong < NEW.so_tien_phai_dong  THEN 'Dong mot phan'
+        ELSE 'Da dong'
+    END;
+END$$
+
 CREATE TRIGGER trg_pt_bi BEFORE INSERT ON phieu_thu FOR EACH ROW
 BEGIN
-    DECLARE v_no       DECIMAL(12,2);
+    DECLARE v_con_lai  DECIMAL(12,2);
     DECLARE v_ngay_tao DATE;
 
     IF NEW.ngay_thu > CURDATE() THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Ngay thu khong duoc o tuong lai';
     END IF;
 
-    SELECT con_no, ngay_tao INTO v_no, v_ngay_tao FROM hoc_phi WHERE ma_hp = NEW.ma_hp;
+    SELECT d.so_tien_phai_dong - d.so_tien_da_dong, hp.ngay_tao
+      INTO v_con_lai, v_ngay_tao
+      FROM dot_dong_hoc_phi d
+      JOIN hoc_phi hp ON hp.ma_hp = d.ma_hp
+     WHERE d.ma_dot = NEW.ma_dot;
 
-    IF v_no IS NOT NULL AND NEW.so_tien_thu > v_no THEN
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'So tien thu vuot qua cong no con lai';
+    IF v_con_lai IS NOT NULL AND NEW.so_tien_thu > v_con_lai THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'So tien thu vuot qua so tien con lai cua dot nay';
     END IF;
     IF v_ngay_tao IS NOT NULL AND NEW.ngay_thu < v_ngay_tao THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Ngay thu khong duoc truoc ngay tao hoc phi';
@@ -347,7 +437,14 @@ END$$
 
 CREATE TRIGGER trg_pt_ai AFTER INSERT ON phieu_thu FOR EACH ROW
 BEGIN
-    UPDATE hoc_phi SET con_no = con_no - NEW.so_tien_thu WHERE ma_hp = NEW.ma_hp;
+    DECLARE v_hp VARCHAR(10);
+
+    UPDATE dot_dong_hoc_phi
+       SET so_tien_da_dong = so_tien_da_dong + NEW.so_tien_thu
+     WHERE ma_dot = NEW.ma_dot;
+
+    SELECT ma_hp INTO v_hp FROM dot_dong_hoc_phi WHERE ma_dot = NEW.ma_dot;
+    UPDATE hoc_phi SET con_no = con_no - NEW.so_tien_thu WHERE ma_hp = v_hp;
 END$$
 
 CREATE TRIGGER trg_pt_bu BEFORE UPDATE ON phieu_thu FOR EACH ROW
@@ -423,6 +520,56 @@ FROM hoc_phi hp
 JOIN hoc_vien hv ON hv.ma_hv  = hp.ma_hv
 JOIN lop_hoc  lh ON lh.ma_lop = hp.ma_lop;
 
+CREATE VIEW v_hoc_phi_hoc_vien AS
+SELECT hv.ma_hv                                                  AS `Mã HV`,
+       hv.ho_ten                                                 AS `Họ và tên`,
+       lh.ten_lop                                                AS `Lớp`,
+       CONCAT(FORMAT(hp.so_tien, 0, 'de_DE'), 'đ')               AS `Học phí`,
+       CONCAT(FORMAT(hp.so_tien - hp.con_no, 0, 'de_DE'), 'đ')   AS `Đã đóng`,
+       CONCAT(FORMAT(hp.con_no, 0, 'de_DE'), 'đ')                AS `Còn nợ`,
+       CASE WHEN hp.con_no = 0 THEN 'Đã thanh toán' ELSE 'Còn nợ' END AS `Trạng thái`
+FROM hoc_phi hp
+JOIN hoc_vien hv ON hv.ma_hv  = hp.ma_hv
+JOIN lop_hoc  lh ON lh.ma_lop = hp.ma_lop
+ORDER BY hv.ma_hv, lh.ma_lop;
+
+CREATE VIEW v_dot_dong_hoc_phi AS
+SELECT d.ma_dot,
+       hp.ma_hp,
+       hv.ma_hv,
+       hv.ho_ten,
+       lh.ten_lop,
+       d.so_thu_tu                                        AS dot_thu,
+       d.so_tien_phai_dong,
+       d.so_tien_da_dong,
+       d.so_tien_phai_dong - d.so_tien_da_dong            AS con_lai,
+       d.han_dong,
+       d.trang_thai,
+       CASE
+           WHEN d.so_tien_da_dong >= d.so_tien_phai_dong THEN 'Da xong'
+           WHEN d.han_dong < CURDATE()                    THEN 'Qua han'
+           ELSE 'Trong han'
+       END                                                AS tinh_trang_han
+FROM dot_dong_hoc_phi d
+JOIN hoc_phi  hp ON hp.ma_hp  = d.ma_hp
+JOIN hoc_vien hv ON hv.ma_hv  = hp.ma_hv
+JOIN lop_hoc  lh ON lh.ma_lop = hp.ma_lop;
+
+CREATE VIEW v_lich_su_thu_tien AS
+SELECT pt.ma_pt,
+       pt.ngay_thu,
+       hv.ho_ten,
+       lh.ten_lop,
+       d.so_thu_tu     AS dot_thu,
+       pt.so_tien_thu,
+       pt.hinh_thuc,
+       pt.ghi_chu
+FROM phieu_thu pt
+JOIN dot_dong_hoc_phi d ON d.ma_dot = pt.ma_dot
+JOIN hoc_phi  hp ON hp.ma_hp  = d.ma_hp
+JOIN hoc_vien hv ON hv.ma_hv  = hp.ma_hv
+JOIN lop_hoc  lh ON lh.ma_lop = hp.ma_lop;
+
 CREATE VIEW v_bang_diem AS
 SELECT hv.ma_hv,
        hv.ho_ten,
@@ -460,9 +607,9 @@ INSERT INTO hoc_vien (ma_hv, ho_ten, ngay_sinh, gioi_tinh, dia_chi, sdt, email, 
 ('HV02','Tran Thi B',  '2005-03-15','Nu',  'Hai Phong',         '0922222222','b@gmail.com','Dang hoc'),
 ('HV03','Le Van C',    '2004-07-20','Khac','Hai Chau, Da Nang', '0933333333','c@gmail.com','Dang hoc');
 
-INSERT INTO giao_vien (ma_gv, ho_ten, ngay_sinh, gioi_tinh, trinh_do, ngay_vao_lam, sdt, email, trang_thai) VALUES
-('GV01','Nguyen Van Teacher','1985-04-10','Nam','Thac si','2015-09-01','0900000001','teacher1@gmail.com','Dang day'),
-('GV02','Tran Teacher',       '1990-06-12','Nu', 'Dai hoc','2018-03-01','0900000002','teacher2@gmail.com','Dang day');
+INSERT INTO giao_vien (ma_gv, ho_ten, ngay_sinh, gioi_tinh, trinh_do, ngay_vao_lam, loai_hop_dong, sdt, email, trang_thai) VALUES
+('GV01','Nguyen Van Teacher','1985-04-10','Nam','Thac si','2015-09-01','Toan thoi gian','0900000001','teacher1@gmail.com','Dang day'),
+('GV02','Tran Teacher',       '1990-06-12','Nu', 'Dai hoc','2018-03-01','Ban thoi gian', '0900000002','teacher2@gmail.com','Dang day');
 
 INSERT INTO khoa_hoc (ma_kh, ten_khoa_hoc, mo_ta, hoc_phi_mac_dinh, thoi_luong, trang_thai) VALUES
 ('KH01','IELTS 6.5',  'Khoa luyen thi IELTS muc tieu 6.5',  5000000, 36, 'Dang mo'),
@@ -482,10 +629,22 @@ INSERT INTO hoc_phi (ma_hp, ma_hv, ma_lop, so_tien, con_no, ngay_tao) VALUES
 ('HP02','HV02','LP01',5000000,5000000,'2026-08-26'),
 ('HP03','HV03','LP02',4000000,4000000,'2026-09-01');
 
-INSERT INTO phieu_thu (ma_pt, ma_hp, ngay_thu, so_tien_thu, hinh_thuc, ghi_chu) VALUES
-('PT01','HP01','2026-08-25',5000000,'Chuyen khoan','Dong du mot lan'),
-('PT02','HP02','2026-08-26',4000000,'Tien mat',    'Dong dot 1'),
-('PT03','HP03','2026-09-01',3500000,'Vi dien tu',  'Dong dot 1');
+INSERT INTO dot_dong_hoc_phi (ma_dot, ma_hp, so_thu_tu, so_tien_phai_dong, han_dong) VALUES
+('DT01','HP01',1,2500000,'2026-08-25'),
+('DT02','HP01',2,2500000,'2026-09-25'),
+('DT03','HP02',1,2000000,'2026-08-26'),
+('DT04','HP02',2,2000000,'2026-09-26'),
+('DT05','HP02',3,1000000,'2026-10-26'),
+('DT06','HP03',1,2000000,'2026-09-01'),
+('DT07','HP03',2,2000000,'2026-11-01');
+
+INSERT INTO phieu_thu (ma_pt, ma_dot, ngay_thu, so_tien_thu, hinh_thuc, ghi_chu) VALUES
+('PT01','DT01','2026-08-25',2500000,'Chuyen khoan','Dot 1 - dong du'),
+('PT02','DT02','2026-09-20',2500000,'Chuyen khoan','Dot 2 - dong du'),
+('PT03','DT03','2026-08-26',2000000,'Tien mat',    'Dot 1 - dong du'),
+('PT04','DT04','2026-09-26',2000000,'Tien mat',    'Dot 2 - dong du'),
+('PT05','DT06','2026-09-01',2000000,'Vi dien tu',  'Dot 1 - dong du'),
+('PT06','DT07','2026-10-15',1500000,'Vi dien tu',  'Dot 2 - dong mot phan');
 
 INSERT INTO diem_danh (ma_dd, ma_hv, ma_lop, ngay_diem_danh, trang_thai) VALUES
 ('DD01','HV01','LP01','2026-09-01','Co mat'),
@@ -522,12 +681,24 @@ SELECT * FROM hoc_vien  WHERE ho_ten LIKE '%Nguyen%';
 SELECT * FROM giao_vien WHERE ho_ten LIKE '%Tran%';
 
 SELECT * FROM v_si_so_lop;
+SELECT * FROM v_hoc_phi_hoc_vien;
 SELECT * FROM v_cong_no;
+SELECT * FROM v_dot_dong_hoc_phi;
+SELECT * FROM v_lich_su_thu_tien;
 SELECT * FROM v_bang_diem;
 SELECT * FROM v_chuyen_can;
 
 SELECT lh.ten_lop, SUM(pt.so_tien_thu) AS tong_da_thu
 FROM phieu_thu pt
-JOIN hoc_phi hp ON hp.ma_hp  = pt.ma_hp
+JOIN dot_dong_hoc_phi d ON d.ma_dot = pt.ma_dot
+JOIN hoc_phi hp ON hp.ma_hp  = d.ma_hp
 JOIN lop_hoc lh ON lh.ma_lop = hp.ma_lop
 GROUP BY lh.ten_lop;
+
+SELECT ho_ten, ten_lop, dot_thu, con_lai, han_dong
+FROM v_dot_dong_hoc_phi
+WHERE tinh_trang_han = 'Qua han';
+
+SELECT loai_hop_dong, COUNT(*) AS so_giao_vien
+FROM giao_vien
+GROUP BY loai_hop_dong;
